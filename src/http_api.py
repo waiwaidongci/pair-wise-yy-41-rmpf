@@ -98,6 +98,31 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path.startswith("/api/batches/"):
+                    batch_no = path.rsplit("/", 1)[-1]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_batch(batch_no, role))
+                elif path.startswith("/api/bridges/") and path.endswith("/conclusion"):
+                    bridge_id = path.split("/")[3]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_bridge_conclusion(bridge_id, role))
+                elif path.startswith("/api/bridges/") and path.endswith("/checkpoint"):
+                    bridge_id = path.split("/")[3]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_write_checkpoint(bridge_id, role))
+                elif path.startswith("/api/bridges/") and path.endswith("/notices"):
+                    bridge_id = path.split("/")[3]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"notices": service.list_notices(bridge_id, role)})
+                elif path.startswith("/api/bridges/") and path.endswith("/batches"):
+                    bridge_id = path.split("/")[3]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"batches": service.list_batches(bridge_id, role)})
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -119,6 +144,23 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/bind-notice"):
+                    item_id = int(path.split("/")[3])
+                    notice_no = body.get("notice_no")
+                    self._json(200, service.bind_notice(item_id, notice_no, actor, role))
+                elif path == "/api/batches":
+                    self._json(201, service.submit_batch(body, actor, role))
+                elif path.startswith("/api/batches/") and path.endswith("/void"):
+                    batch_no = path.split("/")[3]
+                    self._json(200, service.void_batch(batch_no, actor, role))
+                elif path == "/api/notices":
+                    self._json(201, service.create_notice(body, actor, role))
+                elif path.startswith("/api/notices/") and path.endswith("/modify"):
+                    notice_no = path.split("/")[3]
+                    self._json(200, service.modify_notice(notice_no, body, actor, role))
+                elif path.startswith("/api/notices/") and path.endswith("/void"):
+                    notice_no = path.split("/")[3]
+                    self._json(200, service.void_notice(notice_no, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

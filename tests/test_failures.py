@@ -15,6 +15,8 @@ class FailureTest(unittest.TestCase):
         payload={"kind":"action","detail":"same reference","status":"open","external_ref":"DUP-1"}
         self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
         with self.assertRaises(ConflictError): self.service.add_record(self.item["id"],payload,"recorder",'sensor_operator')
+        notice=self.service.create_notice({"notice_no":"NT-1","bridge_id":"BR-1","title":"traffic notice","content":"content","effective_from":"2026-01-01T00:00:00Z"},"authority",'traffic_authority')
+        self.service.bind_notice(self.item["id"],"NT-1","engineer",'bridge_engineer')
         current=self.service.get_item(self.item["id"],"viewer")
         for target in STATES[1:-1]: current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
         with self.assertRaises(ConflictError): self.service.transition(current["id"],STATES[-1],current["version"],"reviewer",TRANSITION_ROLES[STATES[-1]][0])

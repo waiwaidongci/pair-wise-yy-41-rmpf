@@ -11,6 +11,8 @@ class WorkflowTest(unittest.TestCase):
         item=self.service.create_item({"title":"workflow item","description":"complete business flow","severity":'warning',"quantity":12,"threshold":6,"external_ref":"WF-1"},"creator",'sensor_operator')
         self.assertEqual(item["status"],STATES[0])
         self.service.add_record(item["id"],{"kind":"evidence","detail":"evidence registered","status":"closed","external_ref":"EV-1"},"recorder",'sensor_operator')
+        notice=self.service.create_notice({"notice_no":"NT-1","bridge_id":"BR-1","title":"traffic notice","content":"content","effective_from":"2026-01-01T00:00:00Z"},"authority",'traffic_authority')
+        self.service.bind_notice(item["id"],"NT-1","engineer",'bridge_engineer')
         current=item
         for target in STATES[1:]:
             current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])

@@ -30,7 +30,28 @@ python3 app.py --db ./data.db --port 8318
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `POST /api/items/{id}/bind-notice`，限行或封闭前绑定交通通告
 - `GET /api/audit`
+
+### 监测批次
+
+- `POST /api/batches`，幂等提交（同一`batch_no`首次登记生效，重试返回原结果）
+- `GET /api/batches/{batch_no}`
+- `POST /api/batches/{batch_no}/void`，作废后立即失效重算
+- `GET /api/bridges/{bridge_id}/batches`
+
+### 交通通告
+
+- `POST /api/notices`
+- `GET /api/notices/{notice_no}`
+- `POST /api/notices/{notice_no}/modify`，修改后立即失效重算
+- `POST /api/notices/{notice_no}/void`
+- `GET /api/bridges/{bridge_id}/notices`
+
+### 可信结论与写入续写
+
+- `GET /api/bridges/{bridge_id}/conclusion`，按有效时间窗合算的最新结论
+- `GET /api/bridges/{bridge_id}/checkpoint`，返回最后写入的批次号，用于断线续写
 
 允许角色：sensor_operator, bridge_engineer, traffic_authority, viewer。监测偏差与预警阈值之比和多条异常记录决定告警等级；限行与封闭决策必须绑定交通通告记录。
 

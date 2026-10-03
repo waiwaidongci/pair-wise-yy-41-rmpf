@@ -65,6 +65,57 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_no TEXT NOT NULL UNIQUE,
+                    bridge_id TEXT NOT NULL,
+                    valid_from TEXT NOT NULL,
+                    valid_to TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','void')),
+                    payload TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    voided_by TEXT,
+                    voided_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_batches_bridge
+                    ON batches(bridge_id, status, valid_from DESC);
+                CREATE TABLE IF NOT EXISTS notices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    notice_no TEXT NOT NULL UNIQUE,
+                    bridge_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','modified','void')),
+                    effective_from TEXT NOT NULL,
+                    effective_to TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS notice_bindings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE,
+                    notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','released')),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS bridge_conclusions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bridge_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    batch_id INTEGER REFERENCES batches(id),
+                    notice_id INTEGER REFERENCES notices(id),
+                    conclusion TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(bridge_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS write_checkpoints (
+                    bridge_id TEXT PRIMARY KEY,
+                    last_batch_no TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
             """)
 
     @staticmethod
@@ -213,3 +264,237 @@ class Repository:
     def close(self) -> None:
         with self._lock:
             self.conn.close()
+
+    # ---- batches ----
+    def create_batch(self, batch_no: str, bridge_id: str, valid_from: str,
+                     valid_to: str, payload: Dict[str, Any], actor: str) -> tuple:
+        now = utc_now()
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        try:
+            with self._lock, self.conn:
+                self.conn.execute(
+                    """INSERT INTO batches(batch_no, bridge_id, valid_from, valid_to, status,
+                       payload, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                    (batch_no, bridge_id, valid_from, valid_to, "active", payload_json, actor, now),
+                )
+            return self.get_batch(batch_no), True
+        except sqlite3.IntegrityError:
+            return self.get_batch(batch_no), False
+
+    def get_batch(self, batch_no: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM batches WHERE batch_no=?", (batch_no,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("批次不存在")
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def void_batch(self, batch_no: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE batches SET status='void', voided_by=?, voided_at=? WHERE batch_no=? AND status='active'",
+                (actor, now, batch_no),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT status FROM batches WHERE batch_no=?", (batch_no,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("批次不存在")
+                raise ConflictError("批次已作废")
+        return self.get_batch(batch_no)
+
+    def list_batches(self, bridge_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM batches WHERE bridge_id=?"
+        params: tuple = (bridge_id,)
+        if status:
+            sql += " AND status=?"
+            params += (status,)
+        sql += " ORDER BY valid_from DESC, valid_to DESC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            result.append(item)
+        return result
+
+    def get_latest_active_batch(self, bridge_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT * FROM batches WHERE bridge_id=? AND status='active'
+                   ORDER BY valid_from DESC, valid_to DESC LIMIT 1""",
+                (bridge_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def get_checkpoint(self, bridge_id: str) -> Optional[str]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT last_batch_no FROM write_checkpoints WHERE bridge_id=?",
+                (bridge_id,),
+            ).fetchone()
+        return row["last_batch_no"] if row else None
+
+    def update_checkpoint(self, bridge_id: str, batch_no: str) -> None:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.conn.execute(
+                """INSERT INTO write_checkpoints(bridge_id, last_batch_no, updated_at)
+                   VALUES(?,?,?) ON CONFLICT(bridge_id)
+                   DO UPDATE SET last_batch_no=?, updated_at=?""",
+                (bridge_id, batch_no, now, batch_no, now),
+            )
+
+    # ---- notices ----
+    def create_notice(self, notice_no: str, bridge_id: str, title: str, content: str,
+                      effective_from: str, effective_to: Optional[str], actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self._lock, self.conn:
+                self.conn.execute(
+                    """INSERT INTO notices(notice_no, bridge_id, title, content, status,
+                       effective_from, effective_to, created_by, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (notice_no, bridge_id, title, content, "active", effective_from,
+                     effective_to, actor, now, now),
+                )
+        except sqlite3.IntegrityError:
+            raise ConflictError("通告编号已存在")
+        return self.get_notice(notice_no)
+
+    def get_notice(self, notice_no: str) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM notices WHERE notice_no=?", (notice_no,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("通告不存在")
+        return dict(row)
+
+    def modify_notice(self, notice_no: str, title: str, content: str,
+                      effective_from: str, effective_to: Optional[str], actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE notices SET title=?, content=?, effective_from=?, effective_to=?,
+                   status='modified', updated_at=? WHERE notice_no=? AND status!='void'""",
+                (title, content, effective_from, effective_to, now, notice_no),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT status FROM notices WHERE notice_no=?", (notice_no,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("通告不存在")
+                raise ConflictError("通告已作废，不能修改")
+        return self.get_notice(notice_no)
+
+    def void_notice(self, notice_no: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE notices SET status='void', updated_at=? WHERE notice_no=? AND status!='void'",
+                (now, notice_no),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT status FROM notices WHERE notice_no=?", (notice_no,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("通告不存在")
+                raise ConflictError("通告已作废")
+            self.conn.execute(
+                """UPDATE notice_bindings SET status='released'
+                   WHERE notice_id=(SELECT id FROM notices WHERE notice_no=?)""",
+                (notice_no,),
+            )
+        return self.get_notice(notice_no)
+
+    def list_notices(self, bridge_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM notices WHERE bridge_id=?"
+        params: tuple = (bridge_id,)
+        if status:
+            sql += " AND status=?"
+            params += (status,)
+        sql += " ORDER BY effective_from DESC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_active_notice(self, bridge_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT * FROM notices WHERE bridge_id=? AND status IN ('active','modified')
+                   ORDER BY effective_from DESC LIMIT 1""",
+                (bridge_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ---- notice bindings ----
+    def bind_notice(self, item_id: int, notice_id: int, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            self.conn.execute(
+                """INSERT INTO notice_bindings(item_id, notice_id, status, created_by, created_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(item_id) DO UPDATE SET notice_id=?, status='active',
+                   created_by=?, created_at=?""",
+                (item_id, notice_id, "active", actor, now, notice_id, actor, now),
+            )
+        binding = self.get_active_binding(item_id)
+        if binding is None:
+            raise NotFoundError("绑定不存在")
+        return binding
+
+    def get_active_binding(self, item_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT nb.*, n.notice_no, n.status AS notice_status
+                   FROM notice_bindings nb JOIN notices n ON nb.notice_id = n.id
+                   WHERE nb.item_id=? AND nb.status='active'""",
+                (item_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ---- conclusions ----
+    def next_conclusion_version(self, bridge_id: str) -> int:
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM bridge_conclusions WHERE bridge_id=?",
+                (bridge_id,),
+            ).fetchone()
+        return int(row["next"])
+
+    def store_conclusion(self, bridge_id: str, version: int, batch_id: Optional[int],
+                         notice_id: Optional[int], conclusion: Dict[str, Any], actor: str) -> None:
+        now = utc_now()
+        conclusion_json = json.dumps(conclusion, ensure_ascii=False, sort_keys=True)
+        with self._lock, self.conn:
+            self.conn.execute(
+                """INSERT INTO bridge_conclusions(bridge_id, version, batch_id, notice_id,
+                   conclusion, created_at) VALUES(?,?,?,?,?,?)""",
+                (bridge_id, version, batch_id, notice_id, conclusion_json, now),
+            )
+
+    def get_current_conclusion(self, bridge_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT * FROM bridge_conclusions WHERE bridge_id=?
+                   ORDER BY version DESC LIMIT 1""",
+                (bridge_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["conclusion"] = json.loads(result["conclusion"])
+        return result
