@@ -11,9 +11,13 @@ class WorkflowTest(unittest.TestCase):
         item=self.service.create_item({"title":"workflow item","description":"complete business flow","severity":'warning',"quantity":12,"threshold":6,"external_ref":"WF-1"},"creator",'sensor_operator')
         self.assertEqual(item["status"],STATES[0])
         self.service.add_record(item["id"],{"kind":"evidence","detail":"evidence registered","status":"closed","external_ref":"EV-1"},"recorder",'sensor_operator')
+        restriction=self.service.create_notice({"notice_type":"restriction","title":"限流通告","detail":"限载30t","effective_from":"2000-01-01T00:00:00Z"},"ta",'traffic_authority')
+        closure=self.service.create_notice({"notice_type":"closure","title":"封闭通告","detail":"全封闭","effective_from":"2000-01-01T00:00:00Z"},"ta",'traffic_authority')
+        notices={"restricted":restriction["id"],"closed":closure["id"]}
         current=item
         for target in STATES[1:]:
-            current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0])
+            payload={"notice_id":notices[target]} if target in notices else {}
+            current=self.service.transition(current["id"],target,current["version"],"reviewer",TRANSITION_ROLES[target][0],payload)
         self.assertEqual(current["status"],STATES[-1])
         self.assertEqual(len(self.service.list_records(current["id"],"viewer")),1)
         events=self.service.audit("viewer",current["id"]); self.assertGreaterEqual(len(events),len(STATES)+1); self.assertTrue(self.repo.verify_audit_chain())
